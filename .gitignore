@@ -1,0 +1,5 @@
+.streamlit/secrets.toml
+apps_script/Code.txt
+__pycache__/
+.DS_Store
+out/
