@@ -6,7 +6,7 @@ from pathlib import Path
 
 import anthropic
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"
 KNOWLEDGE = (Path(__file__).with_name("knowledge.md")).read_text(encoding="utf-8")
 
 WEB_TOOLS = [

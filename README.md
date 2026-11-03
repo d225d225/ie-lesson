@@ -14,7 +14,7 @@ AI 會逐一閱讀 01～04 資料夾的檔案，整理成 `AI學習筆記.json`�
 
 ## 檔案
 - `app.py`：Streamlit 介面
-- `core/ai.py`：Claude（claude-opus-5-5）三步驟：查網站 → 寫教案 → 寫簡報講稿與網站
+- `core/ai.py`：Claude（claude-sonnet-5-5）三步驟：查網站 → 寫教案 → 寫簡報講稿與網站
 - `core/knowledge.md`：永平高中國際交流背景知識（馬來西亞循人中學、銀禧老婦院、長照／日照中心、聖愛教養院、脊損中心、淨灘…）
 - `core/builders.py`：產生 Word、PPT、課程網站 HTML
 - `core/data.py`：國際教育議題實質內涵與議題清單
