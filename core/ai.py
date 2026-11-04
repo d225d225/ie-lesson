@@ -1,18 +1,18 @@
-"""Claude API：先查教育部國際教育網站與課程工具包，再撰寫教案、簡報講稿與課程網站內容。"""
+"""Google Gemini（免費版）：先查教育部國際教育網站與課程工具包，再撰寫教案、簡報講稿與課程網站內容。"""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import errors, types
 
-MODEL = "claude-sonnet-5-5"
+# 免費額度用完或模型不存在時依序改用下一個；可用 secrets 的 GEMINI_MODEL 指定第一順位
+MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 KNOWLEDGE = (Path(__file__).with_name("knowledge.md")).read_text(encoding="utf-8")
 
-WEB_TOOLS = [
-    {"type": "web_search_20260209", "name": "web_search", "max_uses": 6},
-    {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 8},
-]
+WEB_TOOLS = [types.Tool(google_search=types.GoogleSearch()), types.Tool(url_context=types.UrlContext())]
 
 STYLE_GUIDE = """\
 你是新北市立永平高級中學的國際教育課程設計師，也是很會講笑話的資深老師。
@@ -38,9 +38,9 @@ STYLE_GUIDE = """\
 """
 
 RESEARCH_GUIDE = """\
-你是國際教育課程研究助理。請用 web_fetch 閱讀教育部中小學國際教育網站 https://www.ietw2.edu.tw/ 的課程工具包
+你是國際教育課程研究助理。請閱讀（用網址讀取工具）教育部中小學國際教育網站 https://www.ietw2.edu.tw/ 的課程工具包
 （https://www.ietw2.edu.tw/toolkit/index/type/0801 ）以及使用者列出的每個學習目標檢索網址，
-必要時用 web_search 搜尋 ietw2.edu.tw 上與課程主題相關的工具包或教學資源，點進去讀內容。
+必要時用 Google 搜尋 ietw2.edu.tw 上與課程主題相關的工具包或教學資源，點進去讀內容。
 最後用條列整理（1500 字內）：每個找到的工具包／資源的名稱、網址（只列實際讀到的）、
 可借用的學習目標寫法、教學活動、評量方式與評量規準。只寫讀到的事實，不要自己編課程。
 """
@@ -50,7 +50,7 @@ LS = {"type": "array", "items": S}
 
 
 def _obj(**props):
-    return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
+    return {"type": "object", "properties": props, "required": list(props)}
 
 
 SCHEMA = _obj(
@@ -67,7 +67,7 @@ SCHEMA = _obj(
     expected_outcomes=LS, materials=LS,
     toolkit_refs={"type": "array", "items": _obj(title=S, url=S, how_used=S)},
 )
-# 結構化輸出的文法有大小上限，簡報與網站分開第二次產生
+# 一次輸出太長容易被截斷，簡報與網站分開第二次產生
 DECK_SCHEMA = _obj(
     slides={"type": "array", "items": _obj(title=S, bullets=LS, notes=S)},
     site=_obj(tagline=S, intro=S, student_mission=S, family_note=S, faq={"type": "array", "items": _obj(q=S, a=S)}),
@@ -80,87 +80,82 @@ class AIError(RuntimeError):
     pass
 
 
-class GrammarTooLarge(AIError):
-    pass
+def _parts(attachments: list[dict]) -> list:
+    """drive.to_blocks 的結果轉成 Gemini 的 Part。"""
+    out = []
+    for a in attachments:
+        if "text" in a:
+            out.append(types.Part.from_text(text=f"《{a['name']}》\n{a['text']}"))
+        else:
+            out.append(types.Part.from_bytes(data=a["data"], mime_type=a["mime"]))
+    return out
 
 
-def _client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key, timeout=900, max_retries=3)
-
-
-def _call(api_key: str, system, content: list, schema: dict | None = None, tools: list | None = None,
-          effort: str = "medium", on_event=None) -> str:
-    """回傳 AI 的文字回覆。schema 與 tools 不能同時用（結構化輸出的文法會太大）。"""
-    client = _client(api_key)
-    messages = [{"role": "user", "content": content}]
-    done = []  # pause_turn 前已產生的內容
-    kwargs = dict(
-        model=MODEL, max_tokens=64000, system=system,
-        extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
-        extra_body={"fallbacks": "default", "output_config": {"effort": effort}},
-    )
+def _gen(api_key: str, models: list[str], system: str, parts: list, schema: dict | None = None,
+         tools: list | None = None):
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(system_instruction=system, max_output_tokens=65536, tools=tools)
     if schema:
-        kwargs["extra_body"]["output_config"]["format"] = {"type": "json_schema", "schema": schema}
-    if tools:
-        kwargs["tools"] = tools
-    try:
-        for _ in range(6):  # 伺服器端工具用到一半可能回 pause_turn，要接著送
-            with client.messages.stream(messages=messages, **kwargs) as stream:
-                for ev in stream:
-                    if on_event and ev.type == "content_block_start":
-                        b = ev.content_block
-                        if b.type == "server_tool_use":
-                            on_event(b.name, b.input)
-                msg = stream.get_final_message()
-            if msg.stop_reason != "pause_turn":
-                break
-            done += msg.content
-            messages = [messages[0], {"role": "assistant", "content": done}]
-    except anthropic.AuthenticationError as e:
-        raise AIError("AI 金鑰無效，請管理者檢查 secrets 設定") from e
-    except anthropic.RateLimitError as e:
-        raise AIError("AI 使用量暫時達到上限，請稍後再試") from e
-    except anthropic.APIStatusError as e:
-        if "credit balance" in str(e):
-            raise AIError("AI 帳戶額度用完了，請管理者到 Anthropic Console 的 Plans & Billing 儲值") from e
-        if "grammar is too large" in str(e):
-            raise GrammarTooLarge(str(e)) from e
-        if isinstance(e, anthropic.BadRequestError):
-            raise AIError(f"AI 請求格式錯誤：{e.message}") from e
-        raise AIError(f"AI 服務錯誤（{e.status_code}），請稍後再試") from e
-    except anthropic.APIConnectionError as e:
-        raise AIError("連不上 AI 服務，請檢查網路") from e
-
-    if msg.stop_reason == "refusal":
-        raise AIError("AI 無法處理這份資料，請調整內容後再試")
-    if msg.stop_reason == "max_tokens":
-        raise AIError("AI 回覆太長被截斷，請縮短教學時間或補充說明後再試")
-    return "".join(b.text for b in msg.content if b.type == "text")
+        config.response_mime_type = "application/json"
+        config.response_json_schema = schema
+    last = None
+    for model in models:
+        for attempt in range(3):
+            try:
+                resp = client.models.generate_content(model=model, contents=parts, config=config)
+            except errors.ClientError as e:
+                last = e
+                if e.code == 429 and attempt < 2 and "per_day" not in str(e).lower():
+                    time.sleep(30 * (attempt + 1))  # 每分鐘次數上限，等一下再試
+                    continue
+                if e.code in (429, 404):
+                    break  # 換下一個模型
+                if e.code in (401, 403) or "API key" in str(e):
+                    raise AIError("Gemini 金鑰無效，請管理者檢查 secrets 的 GEMINI_API_KEY") from e
+                raise AIError(f"AI 請求錯誤：{e.message}") from e
+            except errors.ServerError as e:
+                last = e
+                time.sleep(10)
+                continue
+            if not resp.candidates:
+                raise AIError("AI 無法處理這份資料，請調整內容後再試")
+            if str(resp.candidates[0].finish_reason).endswith("MAX_TOKENS"):
+                raise AIError("AI 回覆太長被截斷，請縮短教學時間或補充說明後再試")
+            return resp
+    if isinstance(last, errors.ClientError) and last.code == 429:
+        raise AIError("今天的 Gemini 免費額度用完了（或使用的人太多），請過幾分鐘或明天再試")
+    raise AIError(f"AI 服務暫時無法使用：{last}")
 
 
-def _run(api_key: str, system, content: list, schema: dict, effort: str = "medium") -> dict:
-    try:
-        text = _call(api_key, system, content, schema=schema, effort=effort)
-    except GrammarTooLarge:  # 結構化輸出放不下時，改成用文字要求 JSON
-        rule = "只輸出一個 JSON 物件（不要 ``` 標記、不要其他文字），欄位必須完全符合這個 JSON Schema：\n"
-        text = _call(api_key, system, [*content, {"type": "text", "text": rule + json.dumps(schema, ensure_ascii=False)}],
-                     effort=effort)
+def _json(resp) -> dict:
+    text = resp.text or ""
     try:
         return json.loads(text[text.find("{"):text.rfind("}") + 1])
     except json.JSONDecodeError as e:
         raise AIError("AI 回覆格式錯誤，請再試一次") from e
 
 
-def _system(learned: str) -> list:
-    blocks = [{"type": "text", "text": STYLE_GUIDE},
-              {"type": "text", "text": "〈永平高中背景知識〉\n" + KNOWLEDGE, "cache_control": {"type": "ephemeral"}}]
+def _system(learned: str) -> str:
+    text = STYLE_GUIDE + "\n〈永平高中背景知識〉\n" + KNOWLEDGE
     if learned.strip():
-        blocks.append({"type": "text", "text": "〈教師修改後回饋的經驗〉（請優先遵循）\n" + learned})
-    return blocks
+        text += "\n〈教師修改後回饋的經驗〉（請優先遵循）\n" + learned
+    return text
 
 
-def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on_event=None) -> dict:
-    """form：教師輸入；attachments：已轉成 Claude content block 的參考教材。"""
+def _report(resp, on_event):
+    """把 Gemini 實際搜尋與讀取的網址顯示給使用者。"""
+    cand = resp.candidates[0]
+    gm = getattr(cand, "grounding_metadata", None)
+    for q in (gm.web_search_queries or []) if gm else []:
+        on_event("web_search", {"query": q})
+    um = getattr(cand, "url_context_metadata", None)
+    for m in (um.url_metadata or []) if um else []:
+        on_event("web_fetch", {"url": m.retrieved_url})
+
+
+def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on_event=None,
+             models: list[str] = MODELS) -> dict:
+    """form：教師輸入；attachments：drive.to_blocks 轉好的參考教材。"""
     lines = [
         f"教學年段：{form['level']}",
         f"教學時間：{form['time']}",
@@ -173,28 +168,29 @@ def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on
         "相關連結：" + ("\n" + "\n".join(form["links"]) if form["links"] else "（無）"),
     ]
     request = "\n".join(lines)
-    research = _call(api_key, RESEARCH_GUIDE, [{"type": "text", "text": request}], tools=WEB_TOOLS,
-                     effort="medium", on_event=on_event)
-    content = [*attachments, {"type": "text", "text": request + "\n\n〈教育部國際教育網站閱讀筆記〉\n" + research
-                              + "\n\n先輸出教案（簡報與網站下一步再做）。"}]
-    system = _system(learned)
+    resp = _gen(api_key, models, RESEARCH_GUIDE, [request + "\n\n請先讀 https://www.ietw2.edu.tw/toolkit/index/type/0801"],
+                tools=WEB_TOOLS)
+    research = resp.text or ""
     if on_event:
+        _report(resp, on_event)
         on_event("lesson", {})
-    lesson = _run(api_key, system, content, SCHEMA, effort="high")
+    system = _system(learned)
+    parts = [*_parts(attachments), request + "\n\n〈教育部國際教育網站閱讀筆記〉\n" + research
+             + "\n\n先輸出教案（簡報與網站下一步再做）。"]
+    lesson = _json(_gen(api_key, models, system, parts, SCHEMA))
     if on_event:
         on_event("deck", {})
     deck_req = (request + "\n\n〈已完成的教案〉\n" + json.dumps(lesson, ensure_ascii=False)
                 + "\n\n請依這份教案輸出上課簡報（slides，含幽默講稿）與課程網站文字（site）。")
-    lesson.update(_run(api_key, system, [{"type": "text", "text": deck_req}], DECK_SCHEMA, effort="medium"))
+    lesson.update(_json(_gen(api_key, models, system, [deck_req], DECK_SCHEMA)))
     return lesson
 
 
-def learn(api_key: str, name: str, attachments: list[dict]) -> dict:
+def learn(api_key: str, name: str, attachments: list[dict], models: list[str] = MODELS) -> dict:
     """讀一份老師修改後的檔案（或學校參考資料），整理成之後產生課程時要遵循的經驗。"""
     system = (
         "你在幫永平高中的國際教育課程產生器累積經驗。以下是一份教師修改後上傳的教案／簡報，或學校的參考資料。"
         "請整理：summary（80 字內說明這份檔案是什麼）、lessons（3～8 條具體、可直接套用的寫作原則或在地事實，"
         "例如老師偏好的活動流程、用詞、評量方式、時間配置、服務機構細節）。不要寫學生姓名或個資。"
     )
-    content = [*attachments, {"type": "text", "text": f"檔名：{name}"}]
-    return _run(api_key, system, content, LEARN_SCHEMA, effort="low")
+    return _json(_gen(api_key, models, system, [*_parts(attachments), f"檔名：{name}"], LEARN_SCHEMA))

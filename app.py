@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import os
 
@@ -31,21 +30,8 @@ def secret(key: str) -> str:
     return str(v or os.environ.get(key, "")).strip().strip("　")
 
 
-def anthropic_key() -> str:
-    """Streamlit Cloud 的 Secrets 編輯框會把 sk-ant- 金鑰存成圓點，所以也接受 base64 版本。"""
-    key = secret("ANTHROPIC_API_KEY")
-    if key and "•" not in key:
-        return key
-    b64 = secret("ANTHROPIC_API_KEY_B64")
-    if b64:
-        try:
-            return base64.b64decode(b64).decode("ascii").strip()
-        except Exception:
-            pass
-    return key
-
-
-API_KEY = anthropic_key()
+API_KEY = secret("GEMINI_API_KEY")
+MODELS = [m for m in [secret("GEMINI_MODEL")] if m] + ai.MODELS
 GAS_URL = secret("GAS_WEBHOOK_URL")
 drive = Drive(GAS_URL, secret("GAS_SECRET")) if GAS_URL else None
 ss = st.session_state
@@ -87,7 +73,7 @@ st.markdown(style.hero("國際教育課程教案投影片產生器",
                        "填寫課程需求 → AI 查閱教育部國際教育課程工具包 → 一次產出教案、上課簡報（含講稿）與課程網站",
                        "新北市立永平高級中學"), unsafe_allow_html=True)
 if not API_KEY:
-    st.error("尚未設定 AI 金鑰，請管理者在 secrets 設定 ANTHROPIC_API_KEY。")
+    st.error("尚未設定 AI 金鑰，請管理者在 secrets 設定 GEMINI_API_KEY（Google AI Studio 免費申請）。")
 if not drive:
     st.warning("尚未連線雲端硬碟（GAS_WEBHOOK_URL），仍可產生並下載檔案，但不會建立 Google 文件／簡報／課程網站。")
 
@@ -145,7 +131,7 @@ with tab_make:
             "links": [x.strip() for x in links.splitlines() if x.strip()],
             "objectives": [(c, data.ALL[c][0], data.ALL[c][1], data.ALL[c][2]) for c in chosen],
         }
-        with st.status("AI 正在查閱教育部國際教育網站與課程工具包，並撰寫課程（約 3～6 分鐘）…", expanded=True) as status:
+        with st.status("AI 正在查閱教育部國際教育網站與課程工具包，並撰寫課程（約 2～5 分鐘；免費版人多時會稍等）…", expanded=True) as status:
             try:
                 knowledge = drive.knowledge() if drive else {}
                 attachments = []
@@ -165,7 +151,7 @@ with tab_make:
                     elif name == "deck":
                         st.write("✍ 教案完成，接著寫簡報講稿與課程網站…")
 
-                lesson = ai.generate(API_KEY, form, attachments, learned_text(knowledge), on_event=show)
+                lesson = ai.generate(API_KEY, form, attachments, learned_text(knowledge), on_event=show, models=MODELS)
                 status.update(label="撰寫完成，正在製作檔案…")
                 docx = builders.build_docx(lesson, form)
                 pptx = builders.build_pptx(lesson, form)
@@ -263,7 +249,7 @@ with tab_learn:
                     name, mime, raw = drive.get_file(f["id"])
                     blocks = to_blocks(name, mime, raw)
                     if blocks:
-                        entry.update(ai.learn(API_KEY, f["path"] + name, blocks))
+                        entry.update(ai.learn(API_KEY, f["path"] + name, blocks, models=MODELS))
                     else:
                         entry["summary"] = "（格式無法閱讀或檔案過大，已略過）"
                 except (ai.AIError, DriveError) as e:

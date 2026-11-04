@@ -1,4 +1,4 @@
-"""Apps Script 橋接（雲端硬碟）與檔案轉成 Claude 可讀的內容。"""
+"""Apps Script 橋接（雲端硬碟）與檔案轉成 AI 可讀的內容。"""
 from __future__ import annotations
 
 import base64
@@ -7,7 +7,7 @@ import io
 import requests
 
 IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-MAX_PDF = 30 * 1024 * 1024
+MAX_INLINE = 18 * 1024 * 1024  # Gemini 單次請求內嵌檔案上限約 20MB
 
 
 class DriveError(RuntimeError):
@@ -57,21 +57,14 @@ class Drive:
 
 
 def to_blocks(name: str, mime: str, data: bytes) -> list[dict]:
-    """把一個檔案轉成 Claude 的 content block；讀不了的格式回傳空清單。"""
+    """把一個檔案轉成 AI 可讀的內容：PDF／圖片保留原檔，Word／PPT 取出文字；讀不了回傳空清單。"""
     low = name.lower()
     if mime == "application/pdf" or low.endswith(".pdf"):
-        if len(data) > MAX_PDF:
-            return []
-        return [{"type": "document", "title": name,
-                 "source": {"type": "base64", "media_type": "application/pdf",
-                            "data": base64.b64encode(data).decode("ascii")}}]
+        return [{"name": name, "mime": "application/pdf", "data": data}] if len(data) <= MAX_INLINE else []
     if mime in IMAGE_MIMES:
-        return [{"type": "image", "source": {"type": "base64", "media_type": mime,
-                                             "data": base64.b64encode(data).decode("ascii")}}]
+        return [{"name": name, "mime": mime, "data": data}] if len(data) <= MAX_INLINE else []
     text = _text(low, data)
-    if not text.strip():
-        return []
-    return [{"type": "document", "title": name, "source": {"type": "text", "media_type": "text/plain", "data": text}}]
+    return [{"name": name, "text": text}] if text.strip() else []
 
 
 def _text(low: str, data: bytes) -> str:

@@ -14,7 +14,7 @@ AI 會逐一閱讀 01～04 資料夾的檔案，整理成 `AI學習筆記.json`�
 
 ## 檔案
 - `app.py`：Streamlit 介面
-- `core/ai.py`：Claude（claude-sonnet-5-5）三步驟：查網站 → 寫教案 → 寫簡報講稿與網站
+- `core/ai.py`：Google Gemini 免費版（gemini-flash-latest，額度用完自動改 flash-lite）三步驟：Google 搜尋＋讀網址查教育部網站 → 寫教案 → 寫簡報講稿與網站
 - `core/knowledge.md`：永平高中國際交流背景知識（馬來西亞循人中學、銀禧老婦院、長照／日照中心、聖愛教養院、脊損中心、淨灘…）
 - `core/builders.py`：產生 Word、PPT、課程網站 HTML
 - `core/data.py`：國際教育議題實質內涵與議題清單
@@ -24,10 +24,12 @@ AI 會逐一閱讀 01～04 資料夾的檔案，整理成 `AI學習筆記.json`�
 1. **Apps Script**：到 https://script.google.com 用擁有「國際教育」資料夾的帳號（d225@yphs.tw）新增專案，
    貼上 `apps_script/Code.txt`（含真正的 SECRET，未上傳 GitHub），在「專案設定」勾選顯示 appsscript.json 並貼上 `apps_script/appsscript.json`。
    先選函式 `authorize` 按「執行」授權，再「部署 → 新增部署作業 → 網頁應用程式」，執行身分「我」、存取權「任何人」，複製網址。
-2. **Streamlit**：`secrets.toml` 填 `ANTHROPIC_API_KEY_B64`、`GAS_WEBHOOK_URL`（上一步的網址）、`GAS_SECRET`。
-3. 本機執行：`pip install -r requirements.txt && streamlit run app.py`
+2. **Gemini 金鑰（免費）**：用個人 Google 帳號到 https://aistudio.google.com/apikey 按「Create API key」，不用綁信用卡。
+3. **Streamlit**：`secrets.toml` 填 `GEMINI_API_KEY`、`GAS_WEBHOOK_URL`（上一步的網址）、`GAS_SECRET`。
+4. 本機執行：`pip install -r requirements.txt && streamlit run app.py`
 
 ## 注意
+- 全部免費：Gemini 免費額度、Apps Script、Streamlit Community Cloud。免費版每分鐘、每天有次數上限，額度用完時請稍後或隔天再試；免費版送出的內容可能被 Google 用來改進產品，請勿上傳學生個資。
 - Google 協作平台（Google Sites）沒有開放 API，無法由程式自動建立；課程網站改由 Apps Script 網頁應用程式提供，
   若要放進 Google 協作平台，可在協作平台用「嵌入 → 網址」貼上課程網站連結。
 - 學校網域若禁止對外分享，課程資料夾會自動改為「網域內知道連結者可檢視」。
