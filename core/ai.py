@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -9,10 +10,11 @@ from google import genai
 from google.genai import errors, types
 
 # 免費額度用完或模型不存在時依序改用下一個；可用 secrets 的 GEMINI_MODEL 指定第一順位
-MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"]
+MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 KNOWLEDGE = (Path(__file__).with_name("knowledge.md")).read_text(encoding="utf-8")
 
-WEB_TOOLS = [types.Tool(google_search=types.GoogleSearch()), types.Tool(url_context=types.UrlContext())]
+# 免費方案的 Google 搜尋額度是 0（一用就 429），只用免費的網址讀取
+WEB_TOOLS = [types.Tool(url_context=types.UrlContext())]
 
 STYLE_GUIDE = """\
 你是新北市立永平高級中學的國際教育課程設計師，也是很會講笑話的資深老師。
@@ -40,7 +42,7 @@ STYLE_GUIDE = """\
 RESEARCH_GUIDE = """\
 你是國際教育課程研究助理。請閱讀（用網址讀取工具）教育部中小學國際教育網站 https://www.ietw2.edu.tw/ 的課程工具包
 （https://www.ietw2.edu.tw/toolkit/index/type/0801 ）以及使用者列出的每個學習目標檢索網址，
-必要時用 Google 搜尋 ietw2.edu.tw 上與課程主題相關的工具包或教學資源，點進去讀內容。
+從這些頁面中找出與課程主題相關的工具包或教學資源連結，再讀進去看內容。
 最後用條列整理（1500 字內）：每個找到的工具包／資源的名稱、網址（只列實際讀到的）、
 可借用的學習目標寫法、教學活動、評量方式與評量規準。只寫讀到的事實，不要自己編課程。
 """
@@ -99,28 +101,34 @@ def _gen(api_key: str, models: list[str], system: str, parts: list, schema: dict
         config.response_mime_type = "application/json"
         config.response_json_schema = schema
     last = None
-    for model in models:
-        for attempt in range(3):
+    models = list(models)
+    # 免費版常忙線（503）或達每分鐘上限（429）：輪流試每個模型，整輪失敗就等一下再來，最多約 3 分鐘
+    for rnd in range(5):
+        for model in list(models):
             try:
                 resp = client.models.generate_content(model=model, contents=parts, config=config)
             except errors.ClientError as e:
                 last = e
-                if e.code == 429 and attempt < 2 and "per_day" not in str(e).lower():
-                    time.sleep(30 * (attempt + 1))  # 每分鐘次數上限，等一下再試
+                if e.code == 404:  # 模型已停用
+                    models.remove(model)
                     continue
-                if e.code in (429, 404):
-                    break  # 換下一個模型
+                if e.code == 429:
+                    continue
                 if e.code in (401, 403) or "API key" in str(e):
                     raise AIError("Gemini 金鑰無效，請管理者檢查 secrets 的 GEMINI_API_KEY") from e
                 raise AIError(f"AI 請求錯誤：{e.message}") from e
-            except errors.ServerError as e:  # 503 模型忙線：直接換下一個模型
+            except errors.ServerError as e:
                 last = e
-                break
+                continue
             if not resp.candidates:
                 raise AIError("AI 無法處理這份資料，請調整內容後再試")
             if str(resp.candidates[0].finish_reason).endswith("MAX_TOKENS"):
                 raise AIError("AI 回覆太長被截斷，請縮短教學時間或補充說明後再試")
             return resp
+        if not models:
+            break
+        if rnd < 4:
+            time.sleep(15 + 15 * rnd)
     if isinstance(last, errors.ClientError) and last.code == 429:
         raise AIError("今天的 Gemini 免費額度用完了（或使用的人太多），請過幾分鐘或明天再試")
     raise AIError(f"AI 服務暫時無法使用：{last}")
@@ -139,6 +147,20 @@ def _system(learned: str) -> str:
     if learned.strip():
         text += "\n〈教師修改後回饋的經驗〉（請優先遵循）\n" + learned
     return text
+
+
+def _fix_codes(lesson: dict, form: dict):
+    """模型偶爾把內涵寫成「國U2-1」、目標寫成「國U2-1-1」：改回內涵原文與「國U2-1」編號。"""
+    texts = {c: t for c, _, t, _ in form["objectives"]}
+    for o in lesson["objectives"]:
+        m = re.match(r"國[EJU]\d+", o["code"].replace(" ", ""))
+        if not m:
+            continue
+        base = m.group()
+        o["code"] = base
+        o["text"] = texts.get(base, o["text"])
+        for i, g in enumerate(o["goals"], 1):
+            g["code"] = f"{base}-{i}"
 
 
 def _report(resp, on_event):
@@ -177,6 +199,7 @@ def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on
     parts = [*_parts(attachments), request + "\n\n〈教育部國際教育網站閱讀筆記〉\n" + research
              + "\n\n先輸出教案（簡報與網站下一步再做）。"]
     lesson = _json(_gen(api_key, models, system, parts, SCHEMA))
+    _fix_codes(lesson, form)
     if on_event:
         on_event("deck", {})
     deck_req = (request + "\n\n〈已完成的教案〉\n" + json.dumps(lesson, ensure_ascii=False)
