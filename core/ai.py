@@ -9,7 +9,7 @@ from google import genai
 from google.genai import errors, types
 
 # 免費額度用完或模型不存在時依序改用下一個；可用 secrets 的 GEMINI_MODEL 指定第一順位
-MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
+MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"]
 KNOWLEDGE = (Path(__file__).with_name("knowledge.md")).read_text(encoding="utf-8")
 
 WEB_TOOLS = [types.Tool(google_search=types.GoogleSearch()), types.Tool(url_context=types.UrlContext())]
@@ -113,10 +113,9 @@ def _gen(api_key: str, models: list[str], system: str, parts: list, schema: dict
                 if e.code in (401, 403) or "API key" in str(e):
                     raise AIError("Gemini 金鑰無效，請管理者檢查 secrets 的 GEMINI_API_KEY") from e
                 raise AIError(f"AI 請求錯誤：{e.message}") from e
-            except errors.ServerError as e:
+            except errors.ServerError as e:  # 503 模型忙線：直接換下一個模型
                 last = e
-                time.sleep(10)
-                continue
+                break
             if not resp.candidates:
                 raise AIError("AI 無法處理這份資料，請調整內容後再試")
             if str(resp.candidates[0].finish_reason).endswith("MAX_TOKENS"):
