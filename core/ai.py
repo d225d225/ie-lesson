@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from google import genai
+from opencc import OpenCC
 from google.genai import errors, types
 
 # 免費額度用完或模型不存在時依序改用下一個；可用 secrets 的 GEMINI_MODEL 指定第一順位
@@ -27,7 +28,7 @@ STYLE_GUIDE = """\
    （例如馬來西亞循人中學學伴、銀禧老婦院、長照／日照中心、聖愛教養院、脊髓損傷重建中心、淨灘）。
 
 寫作規範：
-- 台灣繁體中文、十二年國教用語。教案語氣專業具體；講稿與網站可以幽默風趣（諧音梗、生活比喻、和學生對話），但不嘲笑長者、身障者或任何文化。
+- 一律使用台灣繁體中文（不可出現簡體字）、十二年國教用語。教案語氣專業具體；講稿與網站可以幽默風趣（諧音梗、生活比喻、和學生對話），但不嘲笑長者、身障者或任何文化。
 - 學習目標：每個勾選的實質內涵轉化 1～3 條，編號「國U9-1」，以學生為主詞、可評量。
 - 教學活動節數／分鐘數加總要等於教師填的教學時間（一節 50 分鐘；國中 45 分鐘；高國中混齡以 50 分鐘計）。
 - 每個活動寫具體步驟（教師提問、學生任務、分組方式），並寫形成性評量；總結性評量是一個【探究與行動任務】，附 3 等第評量規準。
@@ -149,6 +150,20 @@ def _system(learned: str) -> str:
     return text
 
 
+_S2TW = OpenCC("s2tw")
+
+
+def _to_trad(v):
+    """Gemini 偶爾混用簡體字與“”引號：全部轉成台灣繁體與「」。"""
+    if isinstance(v, str):
+        return _S2TW.convert(v).replace("“", "「").replace("”", "」")
+    if isinstance(v, list):
+        return [_to_trad(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _to_trad(x) for k, x in v.items()}
+    return v
+
+
 def _fix_codes(lesson: dict, form: dict):
     """模型偶爾把內涵寫成「國U2-1」、目標寫成「國U2-1-1」：改回內涵原文與「國U2-1」編號。"""
     texts = {c: t for c, _, t, _ in form["objectives"]}
@@ -205,7 +220,7 @@ def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on
     deck_req = (request + "\n\n〈已完成的教案〉\n" + json.dumps(lesson, ensure_ascii=False)
                 + "\n\n請依這份教案輸出上課簡報（slides，含幽默講稿）與課程網站文字（site）。")
     lesson.update(_json(_gen(api_key, models, system, [deck_req], DECK_SCHEMA)))
-    return lesson
+    return _to_trad(lesson)
 
 
 def learn(api_key: str, name: str, attachments: list[dict], models: list[str] = MODELS) -> dict:
@@ -215,4 +230,4 @@ def learn(api_key: str, name: str, attachments: list[dict], models: list[str] = 
         "請整理：summary（80 字內說明這份檔案是什麼）、lessons（3～8 條具體、可直接套用的寫作原則或在地事實，"
         "例如老師偏好的活動流程、用詞、評量方式、時間配置、服務機構細節）。不要寫學生姓名或個資。"
     )
-    return _json(_gen(api_key, models, system, [*_parts(attachments), f"檔名：{name}"], LEARN_SCHEMA))
+    return _to_trad(_json(_gen(api_key, models, system, [*_parts(attachments), f"檔名：{name}"], LEARN_SCHEMA)))
