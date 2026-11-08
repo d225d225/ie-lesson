@@ -100,6 +100,24 @@ def _h(doc, text):
     _para(doc, text, 13, True, space_after=6)
 
 
+def alignment_matrix(lesson: dict) -> tuple[list[str], list[list[str]]]:
+    """學習目標 × 教學活動／總結性評量／評量規準的對應表，有對應打 ✓。"""
+    acts = lesson["activities"]
+    summ = lesson["summative"]
+    header = ["學習目標"] + [f"活動{i}" for i in range(1, len(acts) + 1)] + ["總結性評量", "評量規準"]
+    rows = []
+    for o in lesson["objectives"]:
+        for g in o["goals"]:
+            c = g["code"]
+            row = [f"{c} {g['text']}"]
+            row += ["✓" if c in a.get("goal_codes", []) else "" for a in acts]
+            row.append("✓" if c in summ.get("goal_codes", []) else "")
+            dims = [r["dimension"] for r in summ["rubric"] if c in r.get("goal_codes", [])]
+            row.append("✓ " + "、".join(dims) if dims else "")
+            rows.append(row)
+    return header, rows
+
+
 def build_docx(lesson: dict, form: dict) -> bytes:
     doc = Document()
     sec = doc.sections[0]
@@ -132,6 +150,8 @@ def build_docx(lesson: dict, form: dict) -> bytes:
     _h(doc, "二、國際教育議題實質內涵、學習目標與總結性評量")
     rows = [["國際教育議題實質內涵", "學習目標", "總結性評量"]]
     summ = f"【{lesson['summative']['name']}】\n{lesson['summative']['description']}"
+    if lesson["summative"].get("goal_codes"):
+        summ += "\n對應目標：" + "、".join(lesson["summative"]["goal_codes"])
     for o in lesson["objectives"]:
         rows.append([f"{o['code']} {o['text']}", [f"{g['code']} {g['text']}" for g in o["goals"]], ""])
     t = _table(doc, rows, [4.5, 8, 4.5])
@@ -158,15 +178,26 @@ def build_docx(lesson: dict, form: dict) -> bytes:
     _table(doc, rows, [2.8, 8.4, 1.6, 1.8, 2.4])
 
     _h(doc, f"六、總結性評量規準：【{lesson['summative']['name']}】")
-    _table(doc, [["向度", "優秀", "良好", "待加強"]] +
-           [[r["dimension"], r["excellent"], r["good"], r["developing"]] for r in lesson["summative"]["rubric"]],
-           [2.6, 4.8, 4.8, 4.8])
+    _table(doc, [["向度", "對應目標", "優秀", "良好", "待加強"]] +
+           [[r["dimension"], r.get("goal_codes", []), r["excellent"], r["good"], r["developing"]]
+            for r in lesson["summative"]["rubric"]],
+           [2.4, 2.0, 4.2, 4.2, 4.2])
 
-    _h(doc, "七、預期成效")
+    _h(doc, "七、指標對應檢核表")
+    header, rows = alignment_matrix(lesson)
+    n = len(header) - 1
+    _table(doc, [header] + rows, [5.0] + [12.0 / n] * n)
+    for i, a in enumerate(lesson["activities"], 1):
+        _para(doc, f"活動{i}：{a['name']}", 9.5, space_after=1)
+    issues = lesson.get("alignment_issues") or []
+    _para(doc, "檢核結果：" + ("全部學習目標皆有對應的教學活動、總結性評量與評量規準。" if not issues
+                           else "；".join(issues)), 10.5, space_after=8)
+
+    _h(doc, "八、預期成效")
     for i, s in enumerate(lesson["expected_outcomes"], 1):
         _para(doc, f"{i}. {s}")
 
-    _h(doc, "八、教學資源與參考資料")
+    _h(doc, "九、教學資源與參考資料")
     for s in lesson["materials"]:
         _para(doc, f"・{s}")
     for r in lesson["toolkit_refs"]:
@@ -226,14 +257,26 @@ def _fit(texts, base, width_in, max_lines):
     return size
 
 
+def _objectives_slide(lesson: dict) -> dict:
+    objs = lesson["objectives"]
+    bullets = [f"{o['code']} {o['text']}" for o in objs][:5]
+    goals = "；".join(f"{g['code']}：{g['text']}" for o in objs for g in o["goals"])
+    notes = ("在開始之前，先跟大家說說這堂課的「通關條件」！這些是教育部國際教育的學習指標，"
+             "也是等一下每個活動要練的功夫。具體來說，上完課你要能做到：" + goals +
+             "。等一下每個活動都會對應這些目標，最後的任務也會照這些來評分，所以請記住它們，這就是你的破關攻略！")
+    return {"title": "本課學習目標", "bullets": bullets, "notes": notes}
+
+
 def build_pptx(lesson: dict, form: dict) -> bytes:
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
     blank = prs.slide_layouts[6]
     W, H = prs.slide_width, prs.slide_height
-    total = len(lesson["slides"])
+    slides = list(lesson["slides"])
+    slides.insert(1, _objectives_slide(lesson))  # 一定有一張列出本課對應的指標
+    total = len(slides)
 
-    for i, s in enumerate(lesson["slides"]):
+    for i, s in enumerate(slides):
         slide = prs.slides.add_slide(blank)
         bg = slide.background.fill
         bg.solid()

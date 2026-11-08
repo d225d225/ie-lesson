@@ -51,6 +51,12 @@ EXAMPLE = {
 }
 
 
+def tidy(text: str) -> str:
+    """去掉多按的空白行（避免教案表格出現一大片空白）。"""
+    lines = [x.rstrip() for x in text.strip().splitlines()]
+    return "\n".join(x for x in lines if x)
+
+
 def learned_text(knowledge: dict) -> str:
     """老師修改後上傳的檔案排前面，其餘學校資料在後。"""
     items = sorted(knowledge.get("files", {}).values(),
@@ -126,8 +132,8 @@ with tab_make:
     if st.button("✦ AI 產生教案、簡報與課程網站", type="primary", width="stretch",
                  disabled=bool(missing) or not API_KEY):
         form = {
-            "level": level, "time": time.strip(), "goal": goal.strip(), "outcome": outcome.strip(),
-            "issues": issues or [], "note": note.strip(),
+            "level": level, "time": time.strip(), "goal": tidy(goal), "outcome": tidy(outcome),
+            "issues": issues or [], "note": tidy(note),
             "links": [x.strip() for x in links.splitlines() if x.strip()],
             "objectives": [(c, data.ALL[c][0], data.ALL[c][1], data.ALL[c][2]) for c in chosen],
         }
@@ -148,6 +154,8 @@ with tab_make:
                         st.write(f"🔎 搜尋「{inp.get('query', '')}」")
                     elif name == "lesson":
                         st.write("✍ 網站讀完了，開始撰寫教案…")
+                    elif name == "repair":
+                        st.write("🔧 檢查指標對應，補齊遺漏：" + "；".join(inp["problems"][:4]) + "…")
                     elif name == "deck":
                         st.write("✍ 教案完成，接著寫簡報講稿與課程網站…")
 
@@ -175,6 +183,10 @@ with tab_make:
         st.divider()
         st.markdown(f"### {lesson['title']}")
         st.write(lesson["subtitle"])
+        if lesson.get("alignment_issues"):
+            st.warning("指標對應檢核：" + "；".join(lesson["alignment_issues"]) + "。請在 Google 文件中補充修改。")
+        elif "alignment_issues" in lesson:
+            st.success("指標對應檢核通過：每個勾選的指標都有學習目標，且都對應到教學活動、總結性評量與評量規準。")
         if r["links"]:
             b = st.columns(4)
             b[0].link_button("開啟 Google 文件（教案）", r["links"]["docUrl"], width="stretch")
@@ -204,6 +216,9 @@ with tab_make:
                 for g in o["goals"]:
                     st.markdown(f"    - {g['code']} {g['text']}")
             st.markdown(f"**總結性評量：【{lesson['summative']['name']}】** {lesson['summative']['description']}")
+            st.markdown("**指標對應檢核表**")
+            header, rows = builders.alignment_matrix(lesson)
+            st.table([dict(zip(header, row)) for row in rows])
             st.markdown("**教學活動**")
             for a in lesson["activities"]:
                 st.markdown(f"- **{a['name']}**（{a['time']}）：" + "；".join(a["steps"]))

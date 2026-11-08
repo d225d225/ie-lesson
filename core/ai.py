@@ -30,7 +30,16 @@ STYLE_GUIDE = """\
 
 寫作規範：
 - 一律使用台灣繁體中文（不可出現簡體字）、十二年國教用語。教案語氣專業具體；講稿與網站可以幽默風趣（諧音梗、生活比喻、和學生對話），但不嘲笑長者、身障者或任何文化。
-- 學習目標：每個勾選的實質內涵轉化 1～3 條，編號「國U9-1」，以學生為主詞、可評量。
+- 指標對應（最重要，務必逐條做到）：
+  1. objectives 只能、也必須包含教師勾選的每一個實質內涵（代碼與文字照抄），不可漏掉、不可自行增加。
+  2. 每個實質內涵轉化 2～3 條學習目標，編號「國U9-1、國U9-2」；寫法依實作手冊：以學生為主詞、
+     使用與該內涵相符的具體動詞（說明、比較、分析、設計、反思、提出…）、寫出情境或條件、具體結果、可衡量的標準
+     （例：「能比較臺灣與馬來西亞至少兩項長者照顧方式的異同，並寫出一項自己的反思」）。
+  3. 每條學習目標至少要出現在一個活動的 goal_codes；每個活動的 formative 要寫出「看到什麼表現代表達成哪個目標」，
+     例如「國U5-1：學習單能寫出兩項文化異同」。
+  4. 總結性評量的 goal_codes 要涵蓋全部學習目標；評量規準每個向度都要標 goal_codes，
+     所有向度合起來要涵蓋全部學習目標（「彰顯國家價值」面向的目標也要有向度評量）。
+  5. goal_codes 一律用學習目標編號（國U9-1），不要只寫內涵代碼（國U9）。summative.name 只寫任務名稱，不要加【】。
 - 教學活動節數／分鐘數加總要等於教師填的教學時間（一節 50 分鐘；國中 45 分鐘；高國中混齡以 50 分鐘計）。
 - 每個活動寫具體步驟（教師提問、學生任務、分組方式），並寫形成性評量；總結性評量是一個【探究與行動任務】，附 3 等第評量規準。
 - 探究問題分事實性、概念性、辯論性。
@@ -64,8 +73,8 @@ SCHEMA = _obj(
         code=S, text=S, goals={"type": "array", "items": _obj(code=S, text=S)})},
     issues={"type": "array", "items": _obj(name=S, integration=S)},
     inquiry=_obj(factual=LS, conceptual=LS, debatable=LS),
-    summative=_obj(name=S, description=S, rubric={"type": "array", "items": _obj(
-        dimension=S, excellent=S, good=S, developing=S)}),
+    summative=_obj(name=S, description=S, goal_codes=LS, rubric={"type": "array", "items": _obj(
+        dimension=S, goal_codes=LS, excellent=S, good=S, developing=S)}),
     activities={"type": "array", "items": _obj(
         name=S, time=S, goal_codes=LS, steps=LS, formative=S)},
     expected_outcomes=LS, materials=LS,
@@ -178,8 +187,10 @@ def _to_trad(v):
 
 
 def _fix_codes(lesson: dict, form: dict):
-    """模型偶爾把內涵寫成「國U2-1」、目標寫成「國U2-1-1」：改回內涵原文與「國U2-1」編號。"""
+    """統一編號：內涵用勾選的代碼與原文，目標依序編成「國U2-1」，活動、總結性評量與規準裡的引用一起改。"""
     texts = {c: t for c, _, t, _ in form["objectives"]}
+    remap: dict[str, str] = {}  # 模型原本寫的目標編號 → 正確編號
+    groups: dict[str, list[str]] = {}  # 內涵代碼 → 底下的目標編號
     for o in lesson["objectives"]:
         m = re.match(r"國[EJU]\d+", o["code"].replace(" ", ""))
         if not m:
@@ -188,7 +199,59 @@ def _fix_codes(lesson: dict, form: dict):
         o["code"] = base
         o["text"] = texts.get(base, o["text"])
         for i, g in enumerate(o["goals"], 1):
-            g["code"] = f"{base}-{i}"
+            new = f"{base}-{i}"
+            remap[g["code"].replace(" ", "")] = new
+            g["code"] = new
+        groups[base] = [g["code"] for g in o["goals"]]
+
+    def fix(codes: list[str]) -> list[str]:
+        out = []
+        for c in codes:
+            c = c.replace(" ", "")
+            if c in remap:
+                out.append(remap[c])
+            elif c in groups:  # 只寫內涵代碼：視為對應底下全部目標
+                out += groups[c]
+            else:
+                m = re.match(r"國[EJU]\d+-\d+", c)
+                out.append(m.group() if m else c)
+        return list(dict.fromkeys(out))
+
+    for a in lesson["activities"]:
+        a["goal_codes"] = fix(a.get("goal_codes", []))
+    summ = lesson["summative"]
+    summ["goal_codes"] = fix(summ.get("goal_codes", []))
+    for r in summ["rubric"]:
+        r["goal_codes"] = fix(r.get("goal_codes", []))
+    summ["name"] = re.sub(r"[【】]", "", summ["name"]).removesuffix("總結性評量").strip()
+
+
+def check_alignment(lesson: dict, form: dict) -> list[str]:
+    """檢查教案是否對應教師勾選的指標；回傳問題清單（空清單代表全部對應）。"""
+    problems = []
+    chosen = [c for c, *_ in form["objectives"]]
+    have = {o["code"]: o for o in lesson["objectives"]}
+    for c in chosen:
+        if c not in have:
+            problems.append(f"勾選的指標 {c} 沒有出現在教案中")
+        elif not have[c]["goals"]:
+            problems.append(f"{c} 沒有轉化成學習目標")
+    for c in have:
+        if c not in chosen:
+            problems.append(f"{c} 不是勾選的指標")
+    used = {c for a in lesson["activities"] for c in a["goal_codes"]}
+    summ = set(lesson["summative"]["goal_codes"])
+    rubric = {c for r in lesson["summative"]["rubric"] for c in r["goal_codes"]}
+    for o in lesson["objectives"]:
+        for g in o["goals"]:
+            code = g["code"]
+            if code not in used:
+                problems.append(f"學習目標 {code} 沒有對應的教學活動")
+            if code not in summ:
+                problems.append(f"學習目標 {code} 沒有納入總結性評量")
+            if code not in rubric:
+                problems.append(f"學習目標 {code} 沒有對應的評量規準向度")
+    return problems
 
 
 def _report(resp, on_event):
@@ -228,6 +291,17 @@ def generate(api_key: str, form: dict, attachments: list[dict], learned: str, on
              + "\n\n先輸出教案（簡報與網站下一步再做）。"]
     lesson = _json(_gen(api_key, models, system, parts, SCHEMA))
     _fix_codes(lesson, form)
+    problems = check_alignment(lesson, form)
+    if problems:  # 有沒對應到的指標：請 AI 只修正對應問題
+        if on_event:
+            on_event("repair", {"problems": problems})
+        fix_req = (request + "\n\n〈教案初稿〉\n" + json.dumps(lesson, ensure_ascii=False)
+                   + "\n\n這份教案的指標對應有以下問題，請修正後輸出完整教案（其餘內容盡量保留）：\n- "
+                   + "\n- ".join(problems))
+        lesson = _json(_gen(api_key, models, system, [fix_req], SCHEMA))
+        _fix_codes(lesson, form)
+        problems = check_alignment(lesson, form)
+    lesson["alignment_issues"] = problems
     if on_event:
         on_event("deck", {})
     deck_req = (request + "\n\n〈已完成的教案〉\n" + json.dumps(lesson, ensure_ascii=False)
