@@ -11,7 +11,8 @@ from opencc import OpenCC
 from google.genai import errors, types
 
 # 免費額度用完或模型不存在時依序改用下一個；可用 secrets 的 GEMINI_MODEL 指定第一順位
-MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
+MODELS = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash", "gemini-3.5-flash-lite",
+          "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
 KNOWLEDGE = (Path(__file__).with_name("knowledge.md")).read_text(encoding="utf-8")
 
 # 免費方案的 Google 搜尋額度是 0（一用就 429），只用免費的網址讀取
@@ -126,13 +127,25 @@ def _gen(api_key: str, models: list[str], system: str, parts: list, schema: dict
             if str(resp.candidates[0].finish_reason).endswith("MAX_TOKENS"):
                 raise AIError("AI 回覆太長被截斷，請縮短教學時間或補充說明後再試")
             return resp
-        if not models:
-            break
+        if not models:  # 名單上的模型都被停用：向 Google 查詢目前可用的 Flash 模型
+            models = _discover(client)
+            if not models:
+                break
         if rnd < 4:
             time.sleep(15 + 15 * rnd)
     if isinstance(last, errors.ClientError) and last.code == 429:
         raise AIError("今天的 Gemini 免費額度用完了（或使用的人太多），請過幾分鐘或明天再試")
     raise AIError(f"AI 服務暫時無法使用：{last}")
+
+
+def _discover(client) -> list[str]:
+    try:
+        names = [m.name.removeprefix("models/") for m in client.models.list()
+                 if "generateContent" in (m.supported_actions or [])]
+    except errors.APIError:
+        return []
+    skip = ("tts", "image", "omni", "audio", "live", "embedding")
+    return sorted((n for n in names if "flash" in n and not any(x in n for x in skip)), reverse=True)[:6]
 
 
 def _json(resp) -> dict:
